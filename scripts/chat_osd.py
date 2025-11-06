@@ -35,7 +35,7 @@ student_model_tag = "d20"
 teacher_source = "sft" # mid|sft
 teacher_model_tag = "d32"
 dtype = "bfloat16"
-device_batch_size = 1 # no forward pass will go above this to not OOM
+device_batch_size = 16 # no forward pass will go above this to not OOM
 examples_per_step = 16 # in total and across all ranks (note: examples, not samples/completions!)
 num_samples = 16 # number of samples per example (/question)
 max_new_tokens = 256
@@ -275,9 +275,10 @@ for step in range(num_steps):
             # num_valid = (targets >= 0).sum().clamp(min=1)
             # pg_obj = pg_obj / (num_valid * num_passes * examples_per_rank)
             # Instead of PG objective, we calculate reverse-KL to teacher model
-            osd_obj = (logp - teacher_logp).sum()
-            # normalize by the number of valid tokens, number of passes, and examples_per_rank
-            num_valid = (targets >= 0).sum().clamp(min=1)
+            valid_mask = targets != -1  # (B, T) 
+            osd_obj = (logp[valid_mask] - teacher_logp[valid_mask]).sum()
+            # normalize by the number of valid tokens, vocab_size, number of passes, and examples_per_rank
+            num_valid = valid_mask.sum().clamp(min=1)
             osd_obj = osd_obj / (num_valid * num_passes * examples_per_rank)
             # We wish to minimize the reverse-KL directly.
             loss = osd_obj
