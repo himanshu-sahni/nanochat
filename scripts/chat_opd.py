@@ -32,7 +32,7 @@ from tasks.gsm8k import GSM8K
 run = "dummy" # wandb run name
 student_source = "sft" # mid|sft
 student_model_tag = "d20"
-teacher_source = "sft" # mid|sft
+teacher_source = "rl" # mid|sft|rl
 teacher_model_tag = "d32"
 dtype = "bfloat16"
 device_batch_size = 16 # no forward pass will go above this to not OOM
