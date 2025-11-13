@@ -6,10 +6,10 @@ This project extends Karpathy’s excellent [nanochat](https://github.com/karpat
 
 Karpathy trained two models:
 
-* d32 — a 32‑layer, ~$1000 compute tier model
-* d20 — a 20‑layer, ~$100 compute tier model
+* d32: a 32‑layer, ~$1000 compute tier model
+* d20: a 20‑layer, ~$100 compute tier model
 
-In this repo, I on-policy distill d20 model using the d32 model as a teacher, using both opd (efficient sampling-based) and opd-full (full KL over logits) variants.
+In this repo, I on-policy distill an SFT'd d20 model using the d32 model as a teacher, using both sampling-based and opd-full (full KL over logits) variants.
 
 For comparison, I also fully re-trained the d20 model from scratch through SFT → RL to provide a clean baseline and a starting point for OPD. Starting point model files here: 
 * [Himanshu d20 SFT]()
@@ -19,30 +19,55 @@ Below you’ll find instructions, results, and a detailed walkthrough of OPD and
 
 ## How to use this repo?
 
-1. Download the required checkpoints into these locations:
+1. Clone the repo
+
+      ```
+      git clone https://github.com/himanshu-sahni/nanochat.git
+      cd nanochat
+      ```
+
+2. Run the initial setup (environment, uv, wandb, data prep) but do not retrain the tokenizer!! You can do this simply by running these commands:
+
+      ```
+      export OMP_NUM_THREADS=1
+      export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
+      mkdir -p $NANOCHAT_BASE_DIR
+      command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+      [ -d ".venv" ] || uv venv
+      uv sync --extra gpu
+      python -m nanochat.report reset
+      source .venv/bin/activate
+      ```
+
+3. Optionally login into wandb by running the following command followed by your API key:
+
+      ```wandb login```
+
+3. Download the required checkpoints into these locations:
+
       ```
       d32 RL -> ~/.cache/nanochat/chatrl_checkpoints/d32/
       d20 SFT -> ~/.cache/nanochat/chatsft_checkpoints/d20/
       token_bytes.pt, tokenizer.pkl -> ~/.cache/nanochat/tokenizer
       ```
-      
-2. Run the initial setup (environment, uv, wandb, data prep) up to line 94 of ```speedrun.sh```, which ends with:
 
-      ```# pretrain the d20 model```
+4. Launch OPD training (replace [NUM_GPUS] with the number of GPUs available):
 
-3. Launch OPD training (replace [NUM_GPUS] with the number of GPUs available):
+      ```torchrun --standalone --nproc_per_node=[NUM_GPUS] -m scripts.chat_opd -- --run=opd_d20```
 
-      ```torchrun --standalone --nproc_per_node=[NUM_GPUS] -m scripts.chat_osd -- --run=opd```
+5. Evaluate the model:
 
-5. Generate a performance report once training is complete:
+      ```torchrun --standalone --nproc_per_node=4 -m scripts.chat_eval -- -i opd -a GSM8K -s 300```
+
+6. Generate a performance report once training is complete:
 
       ```python -m nanochat.report generate```
 
-For reference: running ~300 OPD steps on a 4×H100 instance on vast.ai (~$7.5/hr) cost roughly $10.
+For reference: running 300 OPD steps on a 4×H100 instance on vast.ai (roughly $7.5/hr) cost roughly $10.
 
 ## Results
 
-Below are the evaluation results comparing the baseline models, the SFT and RL checkpoints, and the OPD-trained student. GSM8K is the only task used for RL/OPD training (matching the setup in Karpathy’s repo).
+Below are the evaluation results comparing the baseline models, the SFT and RL checkpoints, and the OPD-trained student. GSM8K is the only task used for RL/OPD training (matching the setup in Karpathy’s repo). RL/OPD runs are evaluated at step 300.
 
 | Metric          | BASE       | MID        | SFT        | RL (D20)   | OPD (D20)  | RL (D32)   |
 |-----------------|------------|------------|------------|------------|------------|------------|
@@ -54,7 +79,7 @@ Below are the evaluation results comparing the baseline models, the SFT and RL c
 | MMLU            | -          | 0.3292     | 0.3320     | -          | -          | -          |
 | ChatCORE        | -          | 0.2581     | 0.2576     | -          | -          | -          |
 
-[WANDB LINK](https://wandb.ai/himsahni-self/nanochat-rl/workspace?nw=nwuserhimsahni)
+[W&B LINK](https://wandb.ai/himsahni-self/nanochat-rl/workspace?nw=nwuserhimsahni)
 
 A few takeaways:
 
@@ -62,17 +87,9 @@ A few takeaways:
 * OPD’s advantage on GSM8K appears early and plateaus slightly higher than RL on the student. Again steps may not be the best x-axis. You can see in the reward curves on W&B.
 * The d32 teacher still leads, as expected for a larger model with more capacity and better mode coverage.
 
-<div style="text-align:center">
-  <figure>
-    <img src="dev/opd-vs-rl-rewards.png"
-         alt="Forward vs. Reverse KL"
-         width="30%"
-         style="display:block; margin:auto;">
-    <figcaption style="margin-top:6px;">OPD vs. RL online rewards.</figcaption>
-  </figure>
-</div>
+![opd-vs-rl](dev/opd-vs-rl-rewards.png)
 
-But let's not just look at numbers and code. To deeply understand how OPD works and we need to go through the full story from completely first principles. I will go through all the math and intuition, not skipping any steps, so we can gain a better appreciation of the method and its connection to reinforcement learning.
+But let's not just look at numbers and code. To deeply understand how OPD works and we need to go through the full story from completely first principles. I will go through all the math and intuition, not skipping any steps, so we can gain a better understanding of the method and its connection to reinforcement learning.
 
 ## On-Policy Distillation (OPD)
 On-Policy Distillation is a distillation method that uses the student’s own rollouts (its “on-policy” trajectories) as the source of input for supervision. This is important as the smaller model may sometimes make mistakes and needs to learn how to recover from them. Think of learning how to drive a car. Regular distillation is like imitating an instructor's drives, it can only teach you what it looks when when everything's going well. On-policy distillation is like an instructor sitting next to you with one hand on the steering wheel, immediately correcting small mistakes and showing you how to recover from the most "shit hits the fan" moments. This technique was recently popularized by the [Thinking machines blogpost](https://thinkingmachines.ai/blog/on-policy-distillation/), originally published for LLMs by [Rishabh Agarwal et al. in 2024](https://arxiv.org/abs/2306.13649) at Google Deepmind. That is in turn closely related to the super popular RL/Robotics technique [DAGGER](https://arxiv.org/abs/1011.0686).
@@ -86,9 +103,9 @@ In standard distillation you sample from the teacher (or have a fixed dataset of
 $$
 \begin{align}
 \mathrm{CE}(t, s)
-&= - \sum_y t(y)\,\log s(y) \\
-&= - \sum_y t(y)\,\log t(y) + \sum_y t(y)\,\log t(y) - \sum_y t(y)\,\log s(y) \\
-&= H(t) + \sum_y t(y)\,(\log t(y) - \log s(y)) \\
+&= - \sum_y t(y) * \log s(y) \\
+&= - \sum_y t(y) * \log t(y) + \sum_y t(y) * \log t(y) - \sum_y t(y) * \log s(y) \\
+&= H(t) + \sum_y t(y) * (\log t(y) - \log s(y)) \\
 &= H(t) + \mathrm{KL}(t\|s).
 \end{align}
 $$
@@ -102,9 +119,11 @@ For
 * Student distribution: $s(⋅)$
 
 $$
+\begin{align}
 \mathrm{KL}(s\|t)
-=
-\sum_y s(y)\,\bigl[\log s(y) - \log t(y)\bigr]
+&=
+\sum_y s(y)\bigl[\log s(y) - \log t(y)\bigr].
+\end{align}
 $$
 
 Why is this a good idea? The behavior of these two objectives is different:
@@ -114,18 +133,10 @@ Why is this a good idea? The behavior of these two objectives is different:
 * Minimizing reverse KL $KL(s\|t)$ is mode-seeking: the student picks one (or a few) modes of the teacher and fits them well, ignoring others.
 
 This is nicely visualized in the figure below from [Rishabh's slides](https://drive.google.com/file/d/1xMohjQcTmQuUd_OiZ3hB1r47WB1WM3Am/view)
-<div style="text-align:center">
-  <figure>
-    <img src="dev/forward-reverse-kl.png"
-         alt="Forward vs. Reverse KL"
-         width="50%"
-         style="display:block; margin:auto;">
-    <figcaption style="margin-top:6px;">Q is the learned distribution (student) and P is the fixed target (teacher). Figure credit: <a href=https://x.com/agarwl_>Rishabh Agarwal</a></figcaption>
-  </figure>
-</div>
 
+![forward vs reverse kl](dev/forward-reverse-kl.png)
 
-Since the student is smaller and under-parameterized compared to the teacher, letting it focus on a subset of modes and do them really well is preferable to spreading its capacity thinly across all modes of the teacher and doing all of them poorly. In the “driving” analogy, we want the student to learn one robust way to drive (and recover when it veers off), not every conceivable optimal style but with no guidance in the off-distribution parts of the state space.
+Where Q is the learned distribution (student) and P is the fixed target (teacher). Since the student is smaller and under-parameterized compared to the teacher, letting it focus on a subset of modes and do them really well is preferable to spreading its capacity thinly across all modes of the teacher and doing all of them poorly. In the “driving” analogy, we want the student to learn one robust way to drive (and recover when it veers off), not every conceivable optimal style but with no guidance in the off-distribution parts of the state space.
 
 ### Token-level view and OPD-full
 
@@ -134,17 +145,19 @@ For LLMs, each sequence $y$ is a minibatch of examples, each example is a sequen
 The full reverse-KL objective (what I call opd-full) sums across the entire vocabulary at every token position:
 
 $$
+\begin{align}
 \mathcal{L}_{\text{OPD-full}}
-=
+&=
 \mathbb{E}_{x \sim s} \Bigg[
 \frac{1}{|T|*|V|} \sum_{t \in T}
 \sum_{i \in V}
 s^i(x_t \mid x_{0:t-1})
 \bigl(\log s^i(x_t \mid x_{0:t-1}) - \log t^i(x_t \mid x_{0:t-1})\bigr)
 \Bigg].
+\end{align}
 $$
 
-This is a perfectly valid way of doing OPD.
+This is a perfectly valid way of doing OPD. But it involves computing the expectation explicitly over the entire vocab for each token. In practice, it is much more efficient to just use sampled tokens to estimate the reverse KL.
 
 ### Sample OPD and the connection to RL
 
@@ -155,87 +168,100 @@ With that being said, it turns out that if you massage the OPD objective a bit t
 Start from the sequence-level reverse KL:
 
 $$
+\begin{align}
 \mathcal{L}_{\text{OPD}}
-=
-\mathrm{KL}(s_\theta\|t)
-=
+&=
+\mathrm{KL}(s_\theta\|t) \\
+&=
 \mathbb{E}_{y \sim s_\theta}
 \bigl[\log s_\theta(y) - \log t(y)\bigr].
+\end{align}
 $$
 
 negating and taking the derivative w.r.t to student model parameters:
+
 $$
 \begin{align}
 \nabla_\theta \bigl(-\mathcal{L}_{\text{OPD}}\bigr)
 &=
-\nabla_\theta \,\mathbb{E}_{y \sim s_\theta}
+\nabla_\theta \mathbb{E}_{y \sim s_\theta}
 \bigl[\log t(y) - \log s_\theta(y)\bigr] \\
 &=
-\nabla_\theta \,\sum_{y \sim s_\theta}
-\bigl[s_\theta(y) * (\log t(y) - \log s_\theta(y))\bigr] \\
-&=
-\sum_{y \sim s_\theta}
-\bigl[\nabla_\theta s_\theta(y) * (\log t(y) - \log s_\theta(y)) + s_\theta(y) * \nabla_\theta(\log t(y) - \log s_\theta(y))\bigr].
+\nabla_\theta \sum_{y \sim s_\theta}
+\bigl[s_\theta(y) * (\log t(y) - \log s_\theta(y))\bigr] 
 \end{align}
 $$
 
-Since the teacher $t(.)$ is constant:
+Let's define $A(y; \theta) = \log t(y) - \log s_\theta(y)$.
 
 $$
+\begin{align}
 \nabla_\theta \bigl(-\mathcal{L}_{\text{OPD}}\bigr)
-=
+&=
 \sum_{y \sim s_\theta}
-\bigl[\nabla_\theta s_\theta(y) * (\log t(y) - \log s_\theta(y)) - s_\theta(y) * \nabla_\theta\log s_\theta(y)\bigr].
+\bigl[A(y; \theta) * \nabla_\theta s_\theta(y) + s_\theta(y) * \nabla_\theta A(y; \theta)\bigr].
+\end{align}
 $$
 
-We know that
+Since the teacher $t(.)$ is constant,
+
 $$
-\nabla_\theta s_\theta(y) = s_\theta(y) *  \nabla_\theta \log s_\theta(y).
+\begin{align}
+\nabla_\theta A(y; \theta) = - \nabla_\theta\log s_\theta(y). \\
+\end{align}
 $$
+
+$$
+\begin{align}
+\nabla_\theta \bigl(-\mathcal{L}_{\text{OPD}}\bigr) = \sum_{y \sim s_\theta} 
+\bigl[A(y; \theta) * \nabla_\theta s_\theta(y) - s_\theta(y) * \nabla_\theta\log s_\theta(y)\bigr].
+\end{align}
+$$
+
+We know that $\nabla_\theta s_\theta(y) = s_\theta(y) *  \nabla_\theta \log s_\theta(y).$
 
 Subsitituting that in both terms and splitting the sum:
 
 $$
+\begin{align}
 \nabla_\theta \bigl(-\mathcal{L}_{\text{OPD}}\bigr)
-=
-\bigl[\sum_{y \sim s_\theta} s_\theta(y) * \nabla_\theta \log s_\theta(y) * (\log t(y) - \log s_\theta(y))\bigr] - \bigl[\sum_{y \sim s_\theta} \nabla_\theta s_\theta(y)\bigr].
+&=
+\bigl[\sum_{y \sim s_\theta} A(y; \theta) * s_\theta(y) * \nabla_\theta \log s_\theta(y)\bigr] - \bigl[\sum_{y \sim s_\theta} \nabla_\theta s_\theta(y)\bigr] \\
+&=
+\mathbb{E}_{y \sim s_\theta} \bigl[A(y; \theta) * \nabla_\theta \log s_\theta(y) \bigr] - \bigl[\sum_{y \sim s_\theta} \nabla_\theta s_\theta(y)\bigr].
+\end{align}
 $$
 
 Let's look at the second term:
+
 $$
-\sum_{y \sim s_\theta} \nabla_\theta s_\theta(y) = \nabla_\theta \sum_{y \sim s_\theta} s_\theta(y) = \nabla_\theta 1 = 0.
+\begin{align}
+\sum_{y \sim s_\theta} \nabla_\theta s_\theta(y) &= \nabla_\theta \sum_{y \sim s_\theta} s_\theta(y) = \nabla_\theta 1 = 0.
+\end{align}
 $$
 
 Therefore,
 
 $$
 \begin{align}
-\nabla_\theta \bigl(-\mathcal{L}_{\text{OPD}}\bigr)
-&=
-\sum_{y \sim s_\theta} s_\theta(y) * \nabla_\theta \log s_\theta(y) * (\log t(y) - \log s_\theta(y)) \\
-&=
-\mathbb{E}_{y \sim s_\theta}
-\bigl[\nabla_\theta \log s_\theta(y) * (\log t(y) - \log s_\theta(y))\bigr].
+\nabla_\theta \bigl(-\mathcal{L}_{\text{OPD}}\bigr) = \mathbb{E}_{y \sim s_\theta}
+\bigl[A(y; \theta) * \nabla_\theta \log s_\theta(y) \bigr].
 \end{align}
 $$
 
-If I define the advantage as $A(y) = \log t(y)- \log s_\theta(y)$, I get,
+This looks exactly like the standard the REINFORCE form:
 
 $$
-\nabla_\theta \bigl(-\mathcal{L}_{\text{OPD}}\bigr)
-=
-\mathbb{E}_{y \sim s_\theta}
-\bigl[\nabla_\theta \log s_\theta(y) * A(y) \bigr].
-$$
-
-This is exactly the REINFORCE form:
-$$
+\begin{align}
 \nabla_\theta J
-=
-\mathbb{E}\bigl[A_t \,\nabla_\theta \log \pi_\theta(a_t \mid s_t)\bigr].
-$$.
+&=
+\mathbb{E}\bigl[A_t * \nabla_\theta \log \pi_\theta(a_t \mid s_t)\bigr].
+\end{align}
+$$
 
-with the advantage at each step defined as the log-probability gap between teacher and student. If the teacher likes a sampled token more than the student ($A_t > 0$), the student’s probability for that token is increased. If the teacher likes it less ($A_t < 0$), the student’s probability is decreased. This can be interpreted as the teacher providing dense, immediate rewards to the student at every step of the trajectory. Hence the connection to RL.
+with the advantage at each step defined as the log-probability gap between teacher and student. Good thing I used the letter A for that.
+
+ If the teacher likes a sampled token more than the student ($A(y; \theta) > 0$), the student’s probability for that token is increased. If the teacher likes it less ($A(y; \theta) < 0$), the student’s probability is decreased. This can be interpreted as the teacher providing dense, immediate rewards to the student at every step of the trajectory. Hence the connection to RL.
 
 This is actually a very cool and deeply satisfying result to see from first principles! It also feels like we're just scratching the surface.
 
@@ -249,7 +275,7 @@ Here are some quick ideas to push this research forward that can easy be tried o
 2. The 80-20 rule - Teacher calls are expensive and not all tokens are equally important. What if we only distill the "important" tokens, e.g. where the student is particularly uncertain? ([See this](https://arxiv.org/abs/2506.01939))
 3. Combine the above two - What if we do reverse KL on top 20% uncertain tokens and forward KL on bottom 80%? What about the opposite?
 4. What can we learn from tokens with high teacher-student mismatch?
-5. Reward Augmented OPD - We can combine RL and OPD by using a weighted advantage term (maybe annealed over time).
+5. Reward Augmented OPD - We can combine RL and OPD by using a weighted advantage term (maybe annealed over time). Rishabh Agarwal mentions this in his [slides](https://drive.google.com/file/d/1xMohjQcTmQuUd_OiZ3hB1r47WB1WM3Am/view) as a way to regularize the student to a more capable teacher model rather than a less capable base student model.
 6. Active learning and curriculum - OPD relies on the student's policy to generate rollouts and the teacher only to provide feedback. Can we also use the teacher to guide the student's exploration?
 7. Robustness to imperfect teachers - OPD assumes a perfect teacher, but in practice the teacher may be wrong or misaligned. After all, the GSM8K score of the teacher we were distilling from here was only 0.2. Should you still distill all trajectories and tokens given an imperfect teacher?
 

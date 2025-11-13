@@ -261,7 +261,7 @@ for step in range(num_steps):
             b0, b1 = pass_idx * device_batch_size, (pass_idx + 1) * device_batch_size
             inputs = inputs_all[b0:b1]
             targets = targets_all[b0:b1]
-            rewards = rewards_all[b0:b1]
+            rewards = rewards_all[b:b1]
             advantages = advantages_all[b0:b1]
             # Calculate log probabilities. Note that the loss calculates NLL = -logp, so we negate
             with autocast_ctx:
@@ -270,10 +270,10 @@ for step in range(num_steps):
             with torch.no_grad(), autocast_ctx:
                 teacher_logp = -teacher_model(inputs, targets, loss_reduction='none').view_as(inputs) # (B, T)
             # Instead of PG objective, we calculate reverse-KL to teacher model
-            valid_mask = targets != -1  # (B, T) 
+            valid_mask = targets != -1  # (B, T)
             adv = (logp[valid_mask] - teacher_logp[valid_mask]).detach()
             opd_obj = (logp[valid_mask] * adv).sum()
-            # normalize by the number of valid tokens, vocab_size, number of passes, and examples_per_rank
+            # normalize by the number of valid tokens, number of passes, and examples_per_rank
             num_valid = valid_mask.sum().clamp(min=1)
             opd_obj = opd_obj / (num_valid * num_passes * examples_per_rank)
             # We wish to minimize the reverse-KL directly.
