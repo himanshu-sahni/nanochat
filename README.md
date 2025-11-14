@@ -69,22 +69,23 @@ For reference: running 300 OPD steps on a 4×H100 instance on vast.ai (roughly $
 
 Below are the evaluation results comparing the baseline models, the SFT and RL checkpoints, and the OPD-trained student. GSM8K is the only task used for RL/OPD training (matching the setup in Karpathy’s repo). RL/OPD runs are evaluated at step 300.
 
-| Metric          | BASE       | MID        | SFT        | RL (D20)   | OPD (D20)  | RL (D32)   |
-|-----------------|------------|------------|------------|------------|------------|------------|
-| CORE            | 0.2060     | -          | -          | -          | -          | -          |
-| ARC-Challenge   | -          | 0.3234     | 0.2995     | -          | -          | -          |
-| ARC-Easy        | -          | 0.4154     | 0.4175     | -          | -          | -          |
-| GSM8K           | -          | 0.0409     | 0.0591     | 0.0766     | 0.1281     | 0.1933     |
-| HumanEval       | -          | 0.0915     | 0.0915     | -          | -          | -          |
-| MMLU            | -          | 0.3292     | 0.3320     | -          | -          | -          |
-| ChatCORE        | -          | 0.2581     | 0.2576     | -          | -          | -          |
+| Metric        | BASE       | MID        | SFT        | RL         | OPD        | OPD FULL   | RL (D32)   |
+|---------------|------------|------------|------------|------------|------------|------------|------------|
+| CORE          | 0.2060     | -          | -          | -          | -          | -          | -          |
+| ARC-Challenge | -          | 0.3234     | 0.2995     | -          | -          | -          | -          |
+| ARC-Easy      | -          | 0.4154     | 0.4175     | -          | -          | -          | -          |
+| GSM8K         | -          | 0.0409     | 0.0591     | 0.0766     | 0.1281     | 0.1425     | 0.1933     |
+| HumanEval     | -          | 0.0915     | 0.0915     | -          | -          | -          | -          |
+| MMLU          | -          | 0.3292     | 0.3320     | -          | -          | -          | -          |
+| ChatCORE      | -          | 0.2581     | 0.2576     | -          | -          | -          | -          |
 
 [W&B LINK](https://wandb.ai/himsahni-self/nanochat-rl/workspace?nw=nwuserhimsahni)
 
 A few takeaways:
 
 * OPD significantly outperforms RL on GSM8K after 300 steps. While step count isn’t a perfect comparison (OPD has higher per‑step FLOPs due to large teacher inference and requires a pre‑trained teacher), it’s encouraging to see it showing strong improvements over RL with the same amount of samples!
-* OPD’s advantage on GSM8K appears early and plateaus slightly higher than RL on the student. Again steps may not be the best x-axis. You can see in the reward curves on W&B.
+* OPD Full (full distributional reverse KL loss) gives a further boost at the expense of extra flops.
+* As seen in the reward curves below, OPD’s advantage appears early and plateaus slightly higher than directly doing RL on the d20 student. Again steps may not be the best x-axis here. Check out the W&B link for more details. 
 * The d32 teacher still leads, as expected for a larger model with more capacity and better mode coverage.
 
 ![opd-vs-rl](dev/opd-vs-rl-rewards.png)
