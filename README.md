@@ -19,9 +19,30 @@ __🔗 Quick Links__
 
 * [Blog Post ⬈](https://himsahni.github.io/2025-11-14-nanochat_on_policy_distillation.html)
 
-* [Model Files ⬈](https://huggingface.co/himsahni/nanochat)
+* [Model Files ⬈](https://drive.google.com/drive/folders/1IrqyiG09Kk5f-84nVokikJhJhJhMcrHd?usp=sharing)
 
 * [W&B Dashboard ⬈](https://wandb.ai/himsahni-self/nanochat-rl/workspace?nw=nwuserhimsahni)
+
+## Code changes
+
+Most of the changes are in ```scripts/chat_opd.py``` where the loss is computed. After loading the teacher in line 71 as:
+
+```python
+teacher_model, tokenizer, teacher_meta = load_model(teacher_source, device, phase="eval", model_tag=teacher_model_tag)
+teacher_model.requires_grad_(False)  # freeze the teacher
+```
+
+you can compute the objective as follows:
+```python
+if full:
+      adv = (logp[valid_mask] - teacher_logp[valid_mask].detach())
+      opd_obj = (probs[valid_mask] * adv).sum()
+else:
+      adv = (logp[valid_mask] - teacher_logp[valid_mask]).detach()
+      opd_obj = (logp[valid_mask] * adv).sum()
+```
+depending on whether you're calculating the full distributional loss or just the sample loss.
+
 
 ## How to use this repo?
 
@@ -49,17 +70,19 @@ __🔗 Quick Links__
 
       ```wandb login```
 
-3. Download the required checkpoints from [hugging face ⬈](https://huggingface.co/himsahni/nanochat) into these locations:
+3. Download the required checkpoints from [drive ⬈](https://drive.google.com/drive/folders/1IrqyiG09Kk5f-84nVokikJhJhJhMcrHd?usp=sharing) into these locations:
 
       ```
-      d32 -> ~/.cache/nanochat/chatrl_checkpoints/d32/
-      d20 -> ~/.cache/nanochat/chatsft_checkpoints/d20/
-      token_bytes.pt, tokenizer.pkl -> ~/.cache/nanochat/tokenizer
+      nanochat/chatrl_checkpoints/d32 -> ~/.cache/nanochat/chatrl_checkpoints/d32/
+      nanochat/chatsft_checkpoints/d20 -> ~/.cache/nanochat/chatsft_checkpoints/d20/
+      nanochat/tokenizer/* -> ~/.cache/nanochat/tokenizer
       ```
 
 4. Launch OPD training (replace [NUM_GPUS] with the number of GPUs available):
 
       ```torchrun --standalone --nproc_per_node=[NUM_GPUS] -m scripts.chat_opd -- --run=opd_d20```
+
+   add option ```--full = True``` for distributional KL loss.
 
 5. Evaluate the model:
 
@@ -96,6 +119,7 @@ A few takeaways:
 
 But let's not just look at numbers and code. To deeply understand how OPD works and we need to go through the full story from completely first principles. 
 Detailed explanation of the method here -> [On-Policy Distillation from First Principles ⬈](https://himsahni.github.io/2025-11-14-nanochat_on_policy_distillation.html).
+
 
 ## ORIGINAL NANOCHAT README FROM KARPATHY'S REPO REPLICATED BELOW
 

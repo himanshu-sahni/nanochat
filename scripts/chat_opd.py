@@ -50,6 +50,7 @@ num_epochs = 1 # how many epochs of gsm8k to train on
 save_every = 60 # every how many steps to save the model
 eval_every = 60 # every how many steps to evaluate the model for val pass@k
 eval_examples = 400 # number of examples used for evaluating pass@k
+full = False
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
@@ -71,6 +72,7 @@ teacher_model, tokenizer, teacher_meta = load_model(teacher_source, device, phas
 teacher_model.requires_grad_(False)  # freeze the teacher
 model, _, meta = load_model(student_source, device, phase="eval", model_tag=student_model_tag)
 engine = Engine(model, tokenizer) # for sampling rollouts
+vocab_size = tokenizer.get_vocab_size()
 
 # -----------------------------------------------------------------------------
 # Rollout / sampling generator loop that yields batches of examples for training
@@ -261,21 +263,37 @@ for step in range(num_steps):
             b0, b1 = pass_idx * device_batch_size, (pass_idx + 1) * device_batch_size
             inputs = inputs_all[b0:b1]
             targets = targets_all[b0:b1]
-            rewards = rewards_all[b:b1]
+            rewards = rewards_all[b0:b1]
             advantages = advantages_all[b0:b1]
-            # Calculate log probabilities. Note that the loss calculates NLL = -logp, so we negate
+            # Calculate log probabilities.
             with autocast_ctx:
-                logp = -model(inputs, targets, loss_reduction='none').view_as(inputs) # (B, T)
+                if full:
+                    logits = model(inputs, None, loss_reduction='none').view(*inputs.shape, vocab_size) # (B, T, V)
+                    logp = torch.nn.functional.log_softmax(logits, dim=-1)
+                    probs = torch.nn.functional.softmax(logits, dim=-1)
+                else:
+                    logp = -model(inputs, targets, loss_reduction='none').view_as(inputs) # (B, T)
             # also get logprobs from the teacher model
             with torch.no_grad(), autocast_ctx:
-                teacher_logp = -teacher_model(inputs, targets, loss_reduction='none').view_as(inputs) # (B, T)
+                if full:
+                    teacher_logits = teacher_model(inputs, None, loss_reduction='none').view(*inputs.shape, vocab_size) # (B, T, V)
+                    teacher_logp = torch.nn.functional.log_softmax(teacher_logits, dim=-1) 
+                else:
+                    teacher_logp = -teacher_model(inputs, targets, loss_reduction='none').view_as(inputs) # (B, T)
             # Instead of PG objective, we calculate reverse-KL to teacher model
             valid_mask = targets != -1  # (B, T)
-            adv = (logp[valid_mask] - teacher_logp[valid_mask]).detach()
-            opd_obj = (logp[valid_mask] * adv).sum()
-            # normalize by the number of valid tokens, number of passes, and examples_per_rank
             num_valid = valid_mask.sum().clamp(min=1)
+            if full:
+                adv = (logp[valid_mask] - teacher_logp[valid_mask].detach())
+                opd_obj = (probs[valid_mask] * adv).sum()
+            else:
+                adv = (logp[valid_mask] - teacher_logp[valid_mask]).detach()
+                opd_obj = (logp[valid_mask] * adv).sum()
+            # normalize by the number of valid tokens, number of passes, and examples_per_rank
             opd_obj = opd_obj / (num_valid * num_passes * examples_per_rank)
+            if full:
+                # also normalize by vocab size 
+                opd_obj = opd_obj / vocab_size
             # We wish to minimize the reverse-KL directly.
             loss = opd_obj
             loss.backward()
